@@ -187,7 +187,7 @@ class ChessComDetector:
 
 if __name__ == "__main__":
     # IMPORTANT: Remplacez ce chemin par celui de stockfish.exe
-    stockfish_path = r"C:\Users\natha\botfish\stockfish.exe"
+    stockfish_path = r""C:\Users\natha\botfish\stockfish\stockfish-windows-x86-64-avx2.exe""
     
     detector = ChessComDetector(stockfish_path)
     detector.run()
