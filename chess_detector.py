@@ -2,12 +2,11 @@ import chess
 import chess.engine
 import pyautogui
 import numpy as np
+from PIL import Image
 import time
 import cv2
 import hashlib
-import re
-import pyperclip
-import keyboard
+import os
 
 class ChessComDetector:
     def __init__(self, stockfish_path):
@@ -16,6 +15,8 @@ class ChessComDetector:
         self.board_position = None
         self.last_board_hash = None
         self.last_fen = None
+        self.piece_templates = {}
+        self.square_size = 0
         
     def start_engine(self):
         """Démarre le moteur Stockfish"""
@@ -55,6 +56,7 @@ class ChessComDetector:
         
         if best_rect:
             self.board_position = best_rect
+            self.square_size = best_rect[2] // 8
             return True
         return False
     
@@ -87,124 +89,185 @@ class ChessComDetector:
         
         return False
     
-    def extract_fen_from_clipboard(self):
+    def create_templates_from_board(self):
         """
-        Essaie d'extraire le FEN depuis le presse-papiers
-        L'utilisateur doit faire clic droit > Copier FEN sur Chess.com
+        Créer des templates de pièces depuis la position de départ
+        Cette fonction doit être appelée sur une position de départ connue
         """
-        try:
-            clipboard_content = pyperclip.paste()
-            
-            # Vérifier si c'est un FEN valide
-            if clipboard_content and len(clipboard_content) > 10:
-                # Pattern FEN basique
-                if re.match(r'^[rnbqkpRNBQKP1-8/\s]+\s[wb]\s', clipboard_content):
-                    return clipboard_content.strip()
-        except Exception as e:
-            print(f"⚠️  Erreur clipboard: {e}")
+        print("\n🎨 Création des templates de pièces...")
+        print("⚠️  Assurez-vous que l'échiquier est en POSITION DE DÉPART")
+        input("▶ Appuyez sur ENTRÉE quand prêt...")
         
-        return None
+        screenshot = pyautogui.screenshot()
+        x, y, w, h = self.board_position
+        
+        # Définir où se trouvent les pièces en position de départ
+        # Format: (file, rank): piece_symbol
+        starting_pieces = {
+            (0, 0): 'R', (1, 0): 'N', (2, 0): 'B', (3, 0): 'Q', 
+            (4, 0): 'K', (5, 0): 'B', (6, 0): 'N', (7, 0): 'R',
+            (0, 1): 'P', (1, 1): 'P', (2, 1): 'P', (3, 1): 'P',
+            (4, 1): 'P', (5, 1): 'P', (6, 1): 'P', (7, 1): 'P',
+            (0, 6): 'p', (1, 6): 'p', (2, 6): 'p', (3, 6): 'p',
+            (4, 6): 'p', (5, 6): 'p', (6, 6): 'p', (7, 6): 'p',
+            (0, 7): 'r', (1, 7): 'n', (2, 7): 'b', (3, 7): 'q',
+            (4, 7): 'k', (5, 7): 'b', (6, 7): 'n', (7, 7): 'r',
+        }
+        
+        for (file, rank), piece in starting_pieces.items():
+            if piece not in self.piece_templates:
+                # Extraire l'image de la case
+                sx = x + file * self.square_size
+                sy = y + (7 - rank) * self.square_size
+                
+                square_img = screenshot.crop((sx, sy, sx + self.square_size, sy + self.square_size))
+                
+                # Stocker le template
+                self.piece_templates[piece] = np.array(square_img)
+        
+        # Extraire aussi une case vide (par exemple e4)
+        sx = x + 4 * self.square_size
+        sy = y + 4 * self.square_size
+        empty_square = screenshot.crop((sx, sy, sx + self.square_size, sy + self.square_size))
+        self.piece_templates['empty'] = np.array(empty_square)
+        
+        print(f"✓ {len(self.piece_templates)} templates créés!")
+        
+        # Sauvegarder les templates
+        if not os.path.exists('templates'):
+            os.makedirs('templates')
+        
+        for piece, template in self.piece_templates.items():
+            img = Image.fromarray(template)
+            img.save(f'templates/{piece}.png')
+        
+        print("✓ Templates sauvegardés dans le dossier 'templates/'")
     
-    def auto_copy_fen(self):
+    def load_templates(self):
+        """Charge les templates depuis le dossier"""
+        if not os.path.exists('templates'):
+            return False
+        
+        template_files = os.listdir('templates')
+        if len(template_files) == 0:
+            return False
+        
+        for filename in template_files:
+            if filename.endswith('.png'):
+                piece = filename.replace('.png', '')
+                img = Image.open(f'templates/{filename}')
+                self.piece_templates[piece] = np.array(img)
+        
+        print(f"✓ {len(self.piece_templates)} templates chargés")
+        return True
+    
+    def match_piece(self, square_img):
         """
-        Automatise la copie du FEN depuis Chess.com
-        Simule un clic droit sur l'échiquier et sélectionne "Copier FEN"
+        Compare une case avec tous les templates et retourne la meilleure correspondance
         """
+        square_img_np = np.array(square_img)
+        
+        # Redimensionner si nécessaire
+        if square_img_np.shape[:2] != (self.square_size, self.square_size):
+            square_img_np = cv2.resize(square_img_np, (self.square_size, self.square_size))
+        
+        best_match = None
+        best_score = 0
+        
+        for piece, template in self.piece_templates.items():
+            # Utiliser la corrélation pour comparer
+            # Convertir en niveaux de gris
+            square_gray = cv2.cvtColor(square_img_np, cv2.COLOR_RGB2GRAY)
+            template_gray = cv2.cvtColor(template, cv2.COLOR_RGB2GRAY)
+            
+            # Calculer la similarité (corrélation)
+            result = cv2.matchTemplate(square_gray, template_gray, cv2.TM_CCOEFF_NORMED)
+            score = result[0][0]
+            
+            if score > best_score:
+                best_score = score
+                best_match = piece
+        
+        # Seuil de confiance
+        if best_score < 0.7:  # Ajuster ce seuil si nécessaire
+            return 'empty'
+        
+        return best_match if best_match != 'empty' else None
+    
+    def detect_board_state(self):
+        """Détecte l'état complet de l'échiquier par reconnaissance de patterns"""
         if not self.board_position:
-            return None
+            return chess.Board()
         
-        try:
-            x, y, w, h = self.board_position
-            center_x = x + w // 2
-            center_y = y + h // 2
-            
-            print("🖱️  Clic droit sur l'échiquier...")
-            
-            # Faire un clic droit au centre de l'échiquier
-            pyautogui.rightClick(center_x, center_y)
-            time.sleep(0.3)
-            
-            # Chess.com affiche "Copy FEN" dans le menu
-            # On simule la touche 'c' ou on cherche le texte
-            # Essai 1: Appuyer sur 'c' (si c'est le raccourci)
-            pyautogui.press('c')
-            time.sleep(0.2)
-            
-            # Vérifier si le FEN est dans le clipboard
-            fen = self.extract_fen_from_clipboard()
-            
-            if fen:
-                print(f"✓ FEN copié automatiquement!")
-                return fen
-            
-            # Essai 2: Cliquer sur la position du menu
-            # (Position approximative, peut varier)
-            print("   Tentative de clic sur 'Copy FEN'...")
-            pyautogui.click(center_x, center_y + 60)
-            time.sleep(0.2)
-            
-            fen = self.extract_fen_from_clipboard()
-            if fen:
-                print(f"✓ FEN copié!")
-                return fen
-            
-            print("⚠️  Copie automatique échouée")
-            return None
-            
-        except Exception as e:
-            print(f"⚠️  Erreur auto-copy: {e}")
-            return None
-    
-    def prompt_for_fen(self):
-        """Demande à l'utilisateur de copier manuellement le FEN"""
-        print("\n" + "="*60)
-        print("📋 COPIE DU FEN")
-        print("="*60)
-        print("\n1. Faites un CLIC DROIT sur l'échiquier Chess.com")
-        print("2. Cliquez sur 'Copy FEN' / 'Copier FEN'")
-        print("3. Appuyez sur ENTRÉE ici")
-        print("\nOu tapez 'start' pour la position initiale")
-        print("="*60)
+        if not self.piece_templates:
+            print("⚠️  Aucun template disponible!")
+            return chess.Board()
         
-        input("\n▶ Appuyez sur ENTRÉE après avoir copié le FEN...")
+        print("🔍 Analyse de l'échiquier en cours...")
         
-        # Lire depuis le clipboard
-        fen = self.extract_fen_from_clipboard()
+        screenshot = pyautogui.screenshot()
+        x, y, w, h = self.board_position
         
-        if fen:
-            print(f"✓ FEN détecté: {fen[:50]}...")
-            return fen
+        # Créer une matrice 8x8 pour stocker les pièces
+        board_matrix = [[None for _ in range(8)] for _ in range(8)]
         
-        # Sinon demander une saisie manuelle
-        print("\n⚠️  Aucun FEN détecté dans le presse-papiers")
-        fen_input = input("📝 Collez ou tapez le FEN: ").strip()
+        # Scanner toutes les cases
+        for rank in range(8):
+            for file in range(8):
+                sx = x + file * self.square_size
+                sy = y + (7 - rank) * self.square_size
+                
+                square_img = screenshot.crop((sx, sy, sx + self.square_size, sy + self.square_size))
+                
+                # Reconnaître la pièce
+                piece = self.match_piece(square_img)
+                board_matrix[rank][file] = piece
         
-        if fen_input.lower() == 'start':
-            return chess.STARTING_FEN
+        # Convertir la matrice en FEN
+        fen = self.matrix_to_fen(board_matrix)
         
-        return fen_input if fen_input else chess.STARTING_FEN
-    
-    def detect_board_state(self, auto_copy=False):
-        """Détecte l'état actuel de l'échiquier"""
-        
-        if auto_copy:
-            # Essayer la copie automatique
-            fen = self.auto_copy_fen()
-            if fen:
-                self.last_fen = fen
-                return chess.Board(fen)
-        
-        # Sinon, demander à l'utilisateur
-        fen = self.prompt_for_fen()
+        print(f"📋 FEN détecté: {fen}")
         
         try:
             board = chess.Board(fen)
             self.last_fen = fen
             return board
         except Exception as e:
-            print(f"❌ FEN invalide: {e}")
-            print("   Utilisation de la position de départ")
+            print(f"⚠️  Erreur de détection FEN: {e}")
+            print(f"    FEN généré: {fen}")
+            if self.last_fen:
+                print("    Utilisation de la dernière position connue")
+                return chess.Board(self.last_fen)
             return chess.Board()
+    
+    def matrix_to_fen(self, matrix):
+        """Convertit une matrice 8x8 de pièces en notation FEN"""
+        fen_rows = []
+        
+        # Parcourir du rang 8 au rang 1 (inversé pour FEN)
+        for rank in range(7, -1, -1):
+            fen_row = ""
+            empty_count = 0
+            
+            for file in range(8):
+                piece = matrix[rank][file]
+                
+                if piece is None:
+                    empty_count += 1
+                else:
+                    if empty_count > 0:
+                        fen_row += str(empty_count)
+                        empty_count = 0
+                    fen_row += piece
+            
+            if empty_count > 0:
+                fen_row += str(empty_count)
+            
+            fen_rows.append(fen_row)
+        
+        # Ajouter les métadonnées FEN
+        fen = "/".join(fen_rows) + " w KQkq - 0 1"
+        return fen
     
     def get_best_moves(self, board, num_moves=3):
         """Obtient les meilleurs coups depuis Stockfish"""
@@ -227,7 +290,6 @@ class ChessComDetector:
             return moves
         except Exception as e:
             print(f"⚠️  Erreur d'analyse: {e}")
-            # Redémarrer le moteur si nécessaire
             try:
                 self.engine.quit()
             except:
@@ -273,9 +335,9 @@ class ChessComDetector:
     def run(self):
         """Lance le détecteur en mode surveillance continue"""
         print("=" * 60)
-        print("🎯 CHESS.COM MOVE SUGGESTER")
+        print("🎯 CHESS.COM MOVE SUGGESTER - AUTO DETECTION")
         print("=" * 60)
-        print("\n⏳ Mode surveillance avec copie FEN")
+        print("\n🤖 Reconnaissance automatique des pièces")
         print("🛑 Appuyez sur Ctrl+C pour arrêter\n")
         
         if not self.start_engine():
@@ -288,36 +350,34 @@ class ChessComDetector:
             time.sleep(2)
         
         print("✓ Échiquier détecté!")
-        print(f"📍 Position: x={self.board_position[0]}, y={self.board_position[1]}, taille={self.board_position[2]}x{self.board_position[3]}\n")
+        print(f"📍 Position: x={self.board_position[0]}, y={self.board_position[1]}, taille={self.board_position[2]}x{self.board_position[3]}")
+        print(f"📏 Taille case: {self.square_size}px\n")
         
-        # Obtenir la position initiale
-        print("📋 Obtention de la position initiale...")
-        board = self.detect_board_state(auto_copy=False)
+        # Charger ou créer les templates
+        if not self.load_templates():
+            print("⚠️  Aucun template trouvé. Création nécessaire...")
+            self.create_templates_from_board()
         
         # Première analyse
         print("\n⚡ Analyse initiale...")
+        board = self.detect_board_state()
         moves = self.get_best_moves(board)
         if moves:
             self.print_moves(moves, board)
         
-        print("\n👀 Surveillance active...")
-        print("💡 Quand un coup est joué, le changement sera détecté automatiquement")
+        print("\n👀 Surveillance active (vérification toutes les 2 secondes)...")
         
         try:
             check_count = 0
             while True:
-                time.sleep(1.5)
+                time.sleep(2)
                 check_count += 1
                 
                 # Vérifier si l'échiquier a changé visuellement
                 if self.has_board_changed():
                     print(f"\n🔄 Changement détecté! (#{check_count})")
                     
-                    # Essayer copie automatique
-                    print("📋 Récupération de la nouvelle position...")
-                    board = self.detect_board_state(auto_copy=True)
-                    
-                    print("⚡ Analyse en cours...")
+                    board = self.detect_board_state()
                     moves = self.get_best_moves(board)
                     
                     if moves:
