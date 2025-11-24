@@ -6,7 +6,6 @@ from PIL import Image
 import time
 import cv2
 import hashlib
-import re
 
 class ChessComDetector:
     def __init__(self, stockfish_path):
@@ -14,7 +13,7 @@ class ChessComDetector:
         self.engine = None
         self.board_position = None
         self.last_board_hash = None
-        self.current_fen = None
+        self.last_fen = None
         
     def start_engine(self):
         """Démarre le moteur Stockfish"""
@@ -86,91 +85,194 @@ class ChessComDetector:
         
         return False
     
-    def extract_fen_from_page(self):
-        """Cherche la notation FEN dans la page Chess.com"""
-        try:
-            screenshot = pyautogui.screenshot()
-            screenshot_np = np.array(screenshot)
-            
-            # Convertir en niveaux de gris
-            gray = cv2.cvtColor(screenshot_np, cv2.COLOR_RGB2GRAY)
-            
-            # Chercher la section avec les coups (zone de texte)
-            # Chess.com affiche parfois le FEN dans le DOM ou dans les outils développeur
-            # Cette approche est limitée, on utilisera plutôt une entrée manuelle
-            
+    def get_square_image(self, screenshot, square_index):
+        """Extrait l'image d'une case spécifique (0-63)"""
+        if not self.board_position:
             return None
-        except:
-            return None
+        
+        x, y, w, h = self.board_position
+        square_size = w // 8
+        
+        # Calculer la position de la case (a1 = 0, h8 = 63)
+        file = square_index % 8  # colonne (0-7)
+        rank = square_index // 8  # rangée (0-7)
+        
+        # Coordonnées en pixels (du point de vue des blancs en bas)
+        sx = x + file * square_size
+        sy = y + (7 - rank) * square_size
+        
+        square_img = screenshot.crop((sx, sy, sx + square_size, sy + square_size))
+        return np.array(square_img)
     
-    def manual_fen_input(self):
-        """Permet à l'utilisateur d'entrer manuellement le FEN"""
-        print("\n" + "="*60)
-        print("⚠️  DÉTECTION AUTOMATIQUE NON DISPONIBLE")
-        print("="*60)
-        print("\nPour obtenir la position FEN sur Chess.com:")
-        print("1. Faites un clic droit sur l'échiquier")
-        print("2. Sélectionnez 'Copier FEN' ou 'Copy FEN'")
-        print("3. Collez le FEN ci-dessous (ou tapez 'start' pour position initiale)")
-        print("\n" + "="*60)
+    def detect_piece_on_square(self, square_img):
+        """
+        Détecte quelle pièce est sur une case
+        Retourne: 'P','N','B','R','Q','K' (blanc) ou 'p','n','b','r','q','k' (noir) ou None
+        """
+        if square_img is None:
+            return None
         
-        fen_input = input("\n📋 Entrez le FEN: ").strip()
+        # Convertir en HSV
+        hsv = cv2.cvtColor(square_img, cv2.COLOR_RGB2HSV)
         
-        if fen_input.lower() == 'start':
-            return chess.STARTING_FEN
+        # Calculer la luminosité moyenne de la case
+        brightness = np.mean(hsv[:, :, 2])
         
-        # Valider le FEN
-        try:
-            board = chess.Board(fen_input)
-            self.current_fen = fen_input
-            return fen_input
-        except:
-            print("❌ FEN invalide, utilisation de la position de départ")
-            return chess.STARTING_FEN
+        # Détecter si une pièce est présente (zone sombre au centre)
+        center_h = square_img.shape[0] // 2
+        center_w = square_img.shape[1] // 2
+        margin = square_img.shape[0] // 4
+        
+        center_region = square_img[
+            center_h - margin:center_h + margin,
+            center_w - margin:center_w + margin
+        ]
+        
+        # Calculer la densité de pixels "pièce" (ni trop clair, ni la couleur de la case)
+        gray_center = cv2.cvtColor(center_region, cv2.COLOR_RGB2GRAY)
+        
+        # Seuillage pour détecter la présence d'une pièce
+        _, thresh = cv2.threshold(gray_center, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        piece_pixels = np.sum(thresh < 128)
+        total_pixels = thresh.size
+        piece_ratio = piece_pixels / total_pixels
+        
+        # Si moins de 15% de pixels "pièce", la case est vide
+        if piece_ratio < 0.15:
+            return None
+        
+        # Détecter la couleur de la pièce
+        # Les pièces blanches ont plus de luminosité
+        piece_region_hsv = cv2.cvtColor(center_region, cv2.COLOR_RGB2HSV)
+        avg_brightness = np.mean(piece_region_hsv[:, :, 2])
+        
+        is_white = avg_brightness > 130  # Seuil empirique
+        
+        # Pour le type de pièce, on utilise la forme (simplification)
+        # Ici on utilise une heuristique basique:
+        # - Hauteur de la pièce (roi/reine = grand, pion = petit)
+        # - Largeur (cavalier/fou différents)
+        
+        # Trouver les contours de la pièce
+        edges = cv2.Canny(gray_center, 50, 150)
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            # Si on détecte une pièce mais pas de contours, supposer un pion
+            return 'P' if is_white else 'p'
+        
+        # Prendre le plus grand contour
+        largest_contour = max(contours, key=cv2.contourArea)
+        x, y, w, h = cv2.boundingRect(largest_contour)
+        
+        # Heuristiques simples (à améliorer avec ML)
+        aspect_ratio = h / w if w > 0 else 1
+        area = cv2.contourArea(largest_contour)
+        
+        # Classification simplifiée (très approximative)
+        if aspect_ratio > 2.5:  # Très vertical
+            piece_type = 'K' if is_white else 'k'  # Roi ou Reine
+        elif aspect_ratio > 2.0:
+            piece_type = 'Q' if is_white else 'q'
+        elif aspect_ratio > 1.5:
+            piece_type = 'R' if is_white else 'r'  # Tour
+        elif aspect_ratio > 1.2:
+            piece_type = 'B' if is_white else 'b'  # Fou
+        elif area < 500:  # Petit
+            piece_type = 'P' if is_white else 'p'  # Pion
+        else:
+            piece_type = 'N' if is_white else 'n'  # Cavalier
+        
+        return piece_type
     
     def detect_board_state(self):
-        """Détecte l'état actuel de l'échiquier"""
-        # Essayer d'extraire le FEN automatiquement (non implémenté complètement)
-        auto_fen = self.extract_fen_from_page()
+        """Détecte l'état complet de l'échiquier"""
+        if not self.board_position:
+            return chess.Board()
         
-        if auto_fen:
-            return chess.Board(auto_fen)
+        print("🔍 Analyse de l'échiquier en cours...")
         
-        # Si pas de FEN stocké, demander à l'utilisateur
-        if self.current_fen is None:
-            fen = self.manual_fen_input()
-            return chess.Board(fen)
+        screenshot = pyautogui.screenshot()
         
-        # Utiliser le FEN actuel
-        return chess.Board(self.current_fen)
-    
-    def update_position_after_move(self, board, move):
-        """Met à jour la position après un coup"""
+        # Créer une matrice 8x8 pour stocker les pièces
+        board_matrix = [[None for _ in range(8)] for _ in range(8)]
+        
+        # Scanner toutes les cases
+        for square_index in range(64):
+            square_img = self.get_square_image(screenshot, square_index)
+            piece = self.detect_piece_on_square(square_img)
+            
+            rank = square_index // 8
+            file = square_index % 8
+            board_matrix[rank][file] = piece
+        
+        # Convertir la matrice en FEN
+        fen = self.matrix_to_fen(board_matrix)
+        
+        print(f"📋 FEN détecté: {fen}")
+        
         try:
-            board.push(move)
-            self.current_fen = board.fen()
+            board = chess.Board(fen)
+            self.last_fen = fen
             return board
-        except:
-            return board
+        except Exception as e:
+            print(f"⚠️  Erreur de détection FEN: {e}")
+            print("   Utilisation de la dernière position connue ou position initiale")
+            if self.last_fen:
+                return chess.Board(self.last_fen)
+            return chess.Board()
+    
+    def matrix_to_fen(self, matrix):
+        """Convertit une matrice 8x8 de pièces en notation FEN"""
+        fen_rows = []
+        
+        # Parcourir du rang 8 au rang 1 (inversé pour FEN)
+        for rank in range(7, -1, -1):
+            fen_row = ""
+            empty_count = 0
+            
+            for file in range(8):
+                piece = matrix[rank][file]
+                
+                if piece is None:
+                    empty_count += 1
+                else:
+                    if empty_count > 0:
+                        fen_row += str(empty_count)
+                        empty_count = 0
+                    fen_row += piece
+            
+            if empty_count > 0:
+                fen_row += str(empty_count)
+            
+            fen_rows.append(fen_row)
+        
+        # Ajouter les métadonnées FEN (simplifié: blancs au trait, tous les roques possibles)
+        fen = "/".join(fen_rows) + " w KQkq - 0 1"
+        return fen
     
     def get_best_moves(self, board, num_moves=3):
         """Obtient les meilleurs coups depuis Stockfish"""
         if not self.engine:
             return []
         
-        result = self.engine.analyse(board, chess.engine.Limit(time=0.5), multipv=num_moves)
-        
-        moves = []
-        for i, info in enumerate(result):
-            move = info['pv'][0]
-            score = info.get('score')
-            moves.append({
-                'move': move,
-                'score': score,
-                'rank': i + 1
-            })
-        
-        return moves
+        try:
+            result = self.engine.analyse(board, chess.engine.Limit(time=0.5), multipv=num_moves)
+            
+            moves = []
+            for i, info in enumerate(result):
+                move = info['pv'][0]
+                score = info.get('score')
+                moves.append({
+                    'move': move,
+                    'score': score,
+                    'rank': i + 1
+                })
+            
+            return moves
+        except Exception as e:
+            print(f"⚠️  Erreur d'analyse: {e}")
+            return []
     
     def print_moves(self, moves, board):
         """Affiche les meilleurs coups dans le terminal"""
@@ -178,7 +280,7 @@ class ChessComDetector:
             return
         
         print("\n" + "="*60)
-        print(f"♟️  POSITION ACTUELLE: {'Blancs' if board.turn else 'Noirs'} à jouer")
+        print(f"♟️  POSITION: {'Blancs' if board.turn else 'Noirs'} à jouer")
         print("="*60)
         print(board)
         print("\n" + "="*60)
@@ -199,7 +301,6 @@ class ChessComDetector:
             else:
                 emoji = f"{rank}."
             
-            # Convertir le coup en notation lisible
             move_san = board.san(move)
             print(f"{emoji} {move_san} [{move}] (Score: {score})")
         
@@ -208,12 +309,11 @@ class ChessComDetector:
     def run(self):
         """Lance le détecteur en mode surveillance continue"""
         print("=" * 60)
-        print("🎯 CHESS.COM MOVE SUGGESTER - MODE AUTO")
+        print("🎯 CHESS.COM MOVE SUGGESTER - DÉTECTION AUTO")
         print("=" * 60)
-        print("\n⏳ Surveillance en continu activée...")
-        print("💡 Le programme détecte automatiquement les changements visuels")
-        print("🛑 Appuyez sur Ctrl+C pour arrêter")
-        print("🔄 Tapez 'update' + Entrée pour changer la position manuellement\n")
+        print("\n🤖 Détection automatique des pièces activée")
+        print("⏳ Surveillance en continu...")
+        print("🛑 Appuyez sur Ctrl+C pour arrêter\n")
         
         if not self.start_engine():
             return
@@ -227,57 +327,31 @@ class ChessComDetector:
         print("✓ Échiquier détecté!")
         print(f"📍 Position: x={self.board_position[0]}, y={self.board_position[1]}, taille={self.board_position[2]}x{self.board_position[3]}\n")
         
-        # Obtenir la position initiale
-        board = self.detect_board_state()
-        
         # Première analyse
-        print("⚡ Analyse initiale...")
+        board = self.detect_board_state()
         moves = self.get_best_moves(board)
         if moves:
             self.print_moves(moves, board)
         
-        print("\n👀 Surveillance active... (détection visuelle des changements)")
-        print("💡 Astuce: Après avoir joué, le changement sera détecté automatiquement")
-        print("⚠️  Si la position n'est pas correcte, redémarrez et entrez le bon FEN\n")
+        print("\n👀 Surveillance active (vérification toutes les 2 secondes)...")
         
         try:
             check_count = 0
             while True:
+                time.sleep(2)
                 check_count += 1
                 
                 # Vérifier si l'échiquier a changé visuellement
                 if self.has_board_changed():
-                    print(f"\n🔄 Changement visuel détecté! (vérification #{check_count})")
+                    print(f"\n🔄 Changement détecté! (#{check_count})")
                     
-                    # Demander à l'utilisateur de confirmer/entrer la nouvelle position
-                    print("📝 Entrez le nouveau FEN (ou 'skip' pour ignorer, 'auto' pour tenter analyse auto):")
-                    user_input = input(">>> ").strip()
-                    
-                    if user_input.lower() == 'skip':
-                        continue
-                    elif user_input.lower() == 'auto':
-                        # Ici on pourrait ajouter une vraie détection OCR
-                        print("⚠️  Fonction non disponible, utilisation de la position actuelle")
-                        board = chess.Board(self.current_fen) if self.current_fen else chess.Board()
-                    else:
-                        try:
-                            board = chess.Board(user_input)
-                            self.current_fen = user_input
-                            print("✓ Position mise à jour!")
-                        except:
-                            print("❌ FEN invalide, position inchangée")
-                            continue
-                    
-                    print("⚡ Analyse en cours...")
+                    board = self.detect_board_state()
                     moves = self.get_best_moves(board)
                     
                     if moves:
                         self.print_moves(moves, board)
                     
                     print("\n👀 Surveillance active...")
-                
-                # Attendre un peu avant la prochaine vérification
-                time.sleep(1)
                 
         except KeyboardInterrupt:
             print("\n\n👋 Arrêt du programme.")
