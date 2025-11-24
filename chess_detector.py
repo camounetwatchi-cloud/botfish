@@ -171,13 +171,27 @@ class ChessComDetector:
         if square_img_np.shape[:2] != (self.square_size, self.square_size):
             square_img_np = cv2.resize(square_img_np, (self.square_size, self.square_size))
         
+        # Convertir en niveaux de gris
+        square_gray = cv2.cvtColor(square_img_np, cv2.COLOR_RGB2GRAY)
+        
+        # D'abord, vérifier si la case est vide
+        if 'empty' in self.piece_templates:
+            empty_template_gray = cv2.cvtColor(self.piece_templates['empty'], cv2.COLOR_RGB2GRAY)
+            empty_result = cv2.matchTemplate(square_gray, empty_template_gray, cv2.TM_CCOEFF_NORMED)
+            empty_score = empty_result[0][0]
+            
+            # Si très similaire à une case vide, c'est vide
+            if empty_score > 0.85:
+                return None
+        
+        # Sinon, chercher quelle pièce c'est
         best_match = None
         best_score = 0
         
         for piece, template in self.piece_templates.items():
-            # Utiliser la corrélation pour comparer
-            # Convertir en niveaux de gris
-            square_gray = cv2.cvtColor(square_img_np, cv2.COLOR_RGB2GRAY)
+            if piece == 'empty':
+                continue  # Déjà vérifié
+            
             template_gray = cv2.cvtColor(template, cv2.COLOR_RGB2GRAY)
             
             # Calculer la similarité (corrélation)
@@ -188,11 +202,11 @@ class ChessComDetector:
                 best_score = score
                 best_match = piece
         
-        # Seuil de confiance
-        if best_score < 0.7:  # Ajuster ce seuil si nécessaire
-            return 'empty'
+        # Seuil de confiance pour les pièces
+        if best_score < 0.65:
+            return None  # Probablement vide ou non reconnu
         
-        return best_match if best_match != 'empty' else None
+        return best_match
     
     def detect_board_state(self):
         """Détecte l'état complet de l'échiquier par reconnaissance de patterns"""
@@ -212,6 +226,7 @@ class ChessComDetector:
         board_matrix = [[None for _ in range(8)] for _ in range(8)]
         
         # Scanner toutes les cases
+        pieces_found = 0
         for rank in range(8):
             for file in range(8):
                 sx = x + file * self.square_size
@@ -222,6 +237,11 @@ class ChessComDetector:
                 # Reconnaître la pièce
                 piece = self.match_piece(square_img)
                 board_matrix[rank][file] = piece
+                
+                if piece is not None:
+                    pieces_found += 1
+        
+        print(f"   {pieces_found} pièces détectées")
         
         # Convertir la matrice en FEN
         fen = self.matrix_to_fen(board_matrix)
@@ -235,10 +255,21 @@ class ChessComDetector:
         except Exception as e:
             print(f"⚠️  Erreur de détection FEN: {e}")
             print(f"    FEN généré: {fen}")
+            
+            # Afficher la matrice pour debug
+            print("\n    Debug - Matrice détectée:")
+            for rank in range(7, -1, -1):
+                row = ""
+                for file in range(8):
+                    p = board_matrix[rank][file]
+                    row += (p if p else '.') + " "
+                print(f"    {rank+1}: {row}")
+            
             if self.last_fen:
-                print("    Utilisation de la dernière position connue")
+                print("\n    Utilisation de la dernière position connue")
                 return chess.Board(self.last_fen)
             return chess.Board()
+    
     
     def matrix_to_fen(self, matrix):
         """Convertit une matrice 8x8 de pièces en notation FEN"""
