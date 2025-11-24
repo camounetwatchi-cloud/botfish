@@ -17,17 +17,15 @@ class ChessComDetector:
     def start_engine(self):
         """Démarre le moteur Stockfish"""
         try:
-            # Sous Windows, vous aurez besoin de WSL ou d'une version Windows de Stockfish
             self.engine = chess.engine.SimpleEngine.popen_uci(self.stockfish_path)
             print("✓ Moteur Stockfish démarré")
             return True
         except Exception as e:
             print(f"✗ Erreur lors du démarrage de Stockfish: {e}")
-            print("\nATTENTION: Le chemin fourni semble être pour une version Linux.")
-            print("Sous Windows, vous devez:")
-            print("1. Télécharger Stockfish pour Windows depuis: https://stockfishchess.org/download/")
-            print("2. Extraire le fichier .exe")
-            print("3. Utiliser le chemin vers stockfish.exe")
+            print("\nATTENTION: Vérifiez que:")
+            print("1. Stockfish est téléchargé depuis: https://stockfishchess.org/download/")
+            print("2. Le fichier stockfish.exe est dans le bon dossier")
+            print("3. Le chemin dans le code est correct")
             return False
     
     def find_chessboard(self):
@@ -188,8 +186,8 @@ class ChessComDetector:
                 print("✓ Moteur fermé.")
 
 if __name__ == "__main__":
-    # IMPORTANT: Remplacez ce chemin par celui de stockfish.exe pour Windows
-    stockfish_path = r"C:\Users\natha\Downloads\stockfish\stockfish.exe"
+    # IMPORTANT: Remplacez ce chemin par celui de stockfish.exe
+    stockfish_path = r"C:\Users\natha\botfish\stockfish.exe"
     
     detector = ChessComDetector(stockfish_path)
     detector.run()
