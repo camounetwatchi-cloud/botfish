@@ -5,14 +5,14 @@ import numpy as np
 from PIL import Image, ImageDraw
 import time
 import cv2
-import subprocess
-import platform
+import hashlib
 
 class ChessComDetector:
     def __init__(self, stockfish_path):
         self.stockfish_path = stockfish_path
         self.engine = None
         self.board_position = None
+        self.last_board_hash = None
         
     def start_engine(self):
         """Démarre le moteur Stockfish"""
@@ -30,7 +30,6 @@ class ChessComDetector:
     
     def find_chessboard(self):
         """Détecte la position de l'échiquier Chess.com à l'écran"""
-        print("\n🔍 Recherche de l'échiquier Chess.com...")
         screenshot = pyautogui.screenshot()
         screenshot_np = np.array(screenshot)
         
@@ -38,7 +37,6 @@ class ChessComDetector:
         screenshot_bgr = cv2.cvtColor(screenshot_np, cv2.COLOR_RGB2BGR)
         
         # Recherche de motifs caractéristiques de Chess.com
-        # (couleurs vertes/marron de l'échiquier)
         hsv = cv2.cvtColor(screenshot_bgr, cv2.COLOR_BGR2HSV)
         
         # Masque pour les cases vertes de Chess.com
@@ -55,35 +53,59 @@ class ChessComDetector:
         
         for contour in contours:
             area = cv2.contourArea(contour)
-            if area > max_area and area > 10000:  # Surface minimale
+            if area > max_area and area > 10000:
                 x, y, w, h = cv2.boundingRect(contour)
-                # Vérifier que c'est approximativement un carré
                 if 0.8 < w/h < 1.2 and w > 300:
                     max_area = area
                     best_rect = (x, y, w, h)
         
         if best_rect:
             self.board_position = best_rect
-            print(f"✓ Échiquier détecté à: x={best_rect[0]}, y={best_rect[1]}, taille={best_rect[2]}x{best_rect[3]}")
             return True
-        else:
-            print("✗ Échiquier non détecté. Assurez-vous que Chess.com est visible à l'écran.")
+        return False
+    
+    def get_board_hash(self):
+        """Génère un hash de l'échiquier pour détecter les changements"""
+        if not self.board_position:
+            return None
+        
+        screenshot = pyautogui.screenshot()
+        x, y, w, h = self.board_position
+        board_img = screenshot.crop((x, y, x + w, y + h))
+        
+        # Convertir en array numpy et calculer un hash
+        img_array = np.array(board_img)
+        img_hash = hashlib.md5(img_array.tobytes()).hexdigest()
+        return img_hash
+    
+    def has_board_changed(self):
+        """Vérifie si l'échiquier a changé depuis la dernière analyse"""
+        current_hash = self.get_board_hash()
+        if current_hash is None:
             return False
+        
+        if self.last_board_hash is None:
+            self.last_board_hash = current_hash
+            return True
+        
+        if current_hash != self.last_board_hash:
+            self.last_board_hash = current_hash
+            return True
+        
+        return False
     
     def detect_board_state(self):
         """Détecte l'état actuel de l'échiquier (simplifié)"""
         # IMPORTANT: Cette version retourne une position de départ
         # Pour une vraie détection, il faudrait utiliser de la vision par ordinateur avancée
-        print("⚠ Utilisation de la position de départ (détection complète non implémentée)")
         return chess.Board()
     
-    def get_best_moves(self, board, num_moves=2):
+    def get_best_moves(self, board, num_moves=3):
         """Obtient les meilleurs coups depuis Stockfish"""
         if not self.engine:
             return []
         
-        print("\n🤔 Analyse en cours...")
-        result = self.engine.analyse(board, chess.engine.Limit(time=1.0), multipv=num_moves)
+        result = self.engine.analyse(board, chess.engine.Limit(time=0.5), multipv=num_moves)
         
         moves = []
         for i, info in enumerate(result):
@@ -94,90 +116,80 @@ class ChessComDetector:
                 'score': score,
                 'rank': i + 1
             })
-            print(f"  {i+1}. {move} (score: {score})")
         
         return moves
     
-    def draw_arrow(self, image, from_square, to_square, color, board_rect):
-        """Dessine une flèche sur l'échiquier"""
-        x, y, w, h = board_rect
-        square_size = w // 8
-        
-        # Convertir les coordonnées d'échecs en pixels
-        from_file = chess.square_file(from_square)
-        from_rank = chess.square_rank(from_square)
-        to_file = chess.square_file(to_square)
-        to_rank = chess.square_rank(to_square)
-        
-        # Calculer les positions (depuis le bas pour les blancs)
-        from_x = x + (from_file + 0.5) * square_size
-        from_y = y + (7 - from_rank + 0.5) * square_size
-        to_x = x + (to_file + 0.5) * square_size
-        to_y = y + (7 - to_rank + 0.5) * square_size
-        
-        draw = ImageDraw.Draw(image, 'RGBA')
-        
-        # Dessiner la flèche
-        arrow_width = square_size // 4
-        draw.line([(from_x, from_y), (to_x, to_y)], fill=color, width=arrow_width)
-        
-        # Dessiner la pointe de la flèche
-        angle = np.arctan2(to_y - from_y, to_x - from_x)
-        arrow_length = square_size // 2
-        
-        # Points de la pointe
-        p1 = (to_x, to_y)
-        p2 = (to_x - arrow_length * np.cos(angle - np.pi/6),
-              to_y - arrow_length * np.sin(angle - np.pi/6))
-        p3 = (to_x - arrow_length * np.cos(angle + np.pi/6),
-              to_y - arrow_length * np.sin(angle + np.pi/6))
-        
-        draw.polygon([p1, p2, p3], fill=color)
-    
-    def show_moves(self, moves):
-        """Affiche les coups recommandés sur l'écran"""
-        if not self.board_position or not moves:
+    def print_moves(self, moves):
+        """Affiche les meilleurs coups dans le terminal"""
+        if not moves:
             return
         
-        screenshot = pyautogui.screenshot()
+        print("\n" + "="*50)
+        print("🎯 MEILLEURS COUPS:")
+        print("="*50)
         
-        colors = [
-            (0, 100, 255, 180),  # Bleu pour le meilleur coup
-            (255, 50, 50, 180),  # Rouge pour le second
-        ]
-        
-        for i, move_info in enumerate(moves[:2]):
+        for move_info in moves:
             move = move_info['move']
-            color = colors[i]
-            self.draw_arrow(screenshot, move.from_square, move.to_square, color, self.board_position)
+            score = move_info['score']
+            rank = move_info['rank']
+            
+            # Formatage de l'affichage
+            if rank == 1:
+                emoji = "🥇"
+            elif rank == 2:
+                emoji = "🥈"
+            elif rank == 3:
+                emoji = "🥉"
+            else:
+                emoji = f"{rank}."
+            
+            print(f"{emoji} {move} (Score: {score})")
         
-        # Afficher l'image
-        screenshot.show()
-        print("\n✓ Coups affichés! Fermez l'image pour continuer.")
+        print("="*50)
     
     def run(self):
-        """Lance le détecteur"""
+        """Lance le détecteur en mode surveillance continue"""
         print("=" * 60)
-        print("🎯 CHESS.COM MOVE SUGGESTER")
+        print("🎯 CHESS.COM MOVE SUGGESTER - MODE AUTO")
         print("=" * 60)
+        print("\n⏳ Surveillance en continu activée...")
+        print("💡 Le programme détecte automatiquement les nouveaux coups")
+        print("🛑 Appuyez sur Ctrl+C pour arrêter\n")
         
         if not self.start_engine():
             return
         
+        # Recherche initiale de l'échiquier
+        print("🔍 Recherche de l'échiquier...")
+        while not self.find_chessboard():
+            print("⏳ Échiquier non détecté, nouvelle tentative dans 2s...")
+            time.sleep(2)
+        
+        print("✓ Échiquier détecté!")
+        print(f"📍 Position: x={self.board_position[0]}, y={self.board_position[1]}, taille={self.board_position[2]}x{self.board_position[3]}\n")
+        print("👀 Surveillance des changements...\n")
+        
         try:
+            check_count = 0
             while True:
-                input("\n📸 Appuyez sur ENTRÉE pour analyser l'échiquier (Ctrl+C pour quitter)...")
+                check_count += 1
                 
-                if self.find_chessboard():
+                # Vérifier si l'échiquier a changé
+                if self.has_board_changed():
+                    print(f"\n🔄 Changement détecté! (vérification #{check_count})")
+                    print("⚡ Analyse en cours...")
+                    
                     board = self.detect_board_state()
-                    print(f"\n📋 Position actuelle:\n{board}")
-                    
                     moves = self.get_best_moves(board)
-                    if moves:
-                        self.show_moves(moves)
-                else:
-                    print("Réessayez avec Chess.com visible à l'écran.")
                     
+                    if moves:
+                        self.print_moves(moves)
+                    
+                    print("\n👀 Surveillance active...")
+                
+                # Attendre un peu avant la prochaine vérification
+                time.sleep(0.5)
+                
         except KeyboardInterrupt:
             print("\n\n👋 Arrêt du programme.")
         finally:
@@ -186,7 +198,7 @@ class ChessComDetector:
                 print("✓ Moteur fermé.")
 
 if __name__ == "__main__":
-    # IMPORTANT: Remplacez ce chemin par celui de stockfish.exe
+    # Chemin vers Stockfish
     stockfish_path = r"C:\Users\natha\botfish\stockfish\stockfish-windows-x86-64-avx2.exe"
     
     detector = ChessComDetector(stockfish_path)
