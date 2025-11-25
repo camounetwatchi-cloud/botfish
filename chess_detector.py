@@ -18,6 +18,12 @@ class ChessComDetector:
         self.piece_templates = {}
         self.square_size = 0
         
+        # Mapping entre votre format de noms et les symboles FEN
+        self.template_to_fen = {
+            'wk': 'K', 'wq': 'Q', 'wr': 'R', 'wb': 'B', 'wn': 'N', 'wp': 'P',
+            'bk': 'k', 'bq': 'q', 'br': 'r', 'bb': 'b', 'bn': 'n', 'bp': 'p'
+        }
+        
     def start_engine(self):
         """Démarre le moteur Stockfish"""
         try:
@@ -89,153 +95,77 @@ class ChessComDetector:
         
         return False
     
-    def create_templates_from_board(self):
-        """
-        Créer des templates de pièces depuis la position de départ
-        Cette fonction doit être appelée sur une position de départ connue
-        """
-        print("\n🎨 Création des templates de pièces...")
-        print("⚠️  Assurez-vous que l'échiquier est en POSITION DE DÉPART")
-        print("⚠️  Important: Les BLANCS doivent être EN BAS de l'échiquier!")
-        input("▶ Appuyez sur ENTRÉE quand prêt...")
-        
-        screenshot = pyautogui.screenshot()
-        x, y, w, h = self.board_position
-        
-        # Définir où se trouvent les pièces en position de départ
-        # Format: (file, rank): piece_symbol
-        # rank 0 = bas de l'écran (blancs), rank 7 = haut de l'écran (noirs)
-        starting_pieces = {
-            # Pièces blanches (en bas)
-            (0, 0): 'R', (1, 0): 'N', (2, 0): 'B', (3, 0): 'Q', 
-            (4, 0): 'K', (5, 0): 'B', (6, 0): 'N', (7, 0): 'R',
-            (0, 1): 'P', (1, 1): 'P', (2, 1): 'P', (3, 1): 'P',
-            (4, 1): 'P', (5, 1): 'P', (6, 1): 'P', (7, 1): 'P',
-            # Pièces noires (en haut)
-            (0, 6): 'p', (1, 6): 'p', (2, 6): 'p', (3, 6): 'p',
-            (4, 6): 'p', (5, 6): 'p', (6, 6): 'p', (7, 6): 'p',
-            (0, 7): 'r', (1, 7): 'n', (2, 7): 'b', (3, 7): 'q',
-            (4, 7): 'k', (5, 7): 'b', (6, 7): 'n', (7, 7): 'r',
-        }
-        
-        pieces_created = {}
-        
-        for (file, rank), piece in starting_pieces.items():
-            # Extraire l'image de la case
-            # rank 0 est en bas, donc on inverse pour l'écran (7 - rank)
-            sx = x + file * self.square_size
-            sy = y + (7 - rank) * self.square_size
-            
-            square_img = screenshot.crop((sx, sy, sx + self.square_size, sy + self.square_size))
-            
-            # Si on n'a pas encore de template pour cette pièce, on le crée
-            if piece not in self.piece_templates:
-                self.piece_templates[piece] = np.array(square_img)
-                pieces_created[piece] = 1
-            else:
-                # Si on a déjà un template, on compte juste
-                pieces_created[piece] = pieces_created.get(piece, 1) + 1
-        
-        # Extraire aussi des cases vides (e3, e4, d4, d5)
-        empty_squares = [(4, 3), (4, 4), (3, 3), (3, 4)]
-        empty_templates = []
-        
-        for file, rank in empty_squares:
-            sx = x + file * self.square_size
-            sy = y + (7 - rank) * self.square_size
-            empty_square = screenshot.crop((sx, sy, sx + self.square_size, sy + self.square_size))
-            empty_templates.append(np.array(empty_square))
-        
-        # Moyenne des cases vides pour avoir un meilleur template
-        self.piece_templates['empty'] = np.mean(empty_templates, axis=0).astype(np.uint8)
-        
-        print(f"\n✓ Templates créés:")
-        print(f"   Pièces blanches (majuscules): R={pieces_created.get('R', 0)}, N={pieces_created.get('N', 0)}, B={pieces_created.get('B', 0)}, Q={pieces_created.get('Q', 0)}, K={pieces_created.get('K', 0)}, P={pieces_created.get('P', 0)}")
-        print(f"   Pièces noires (minuscules): r={pieces_created.get('r', 0)}, n={pieces_created.get('n', 0)}, b={pieces_created.get('b', 0)}, q={pieces_created.get('q', 0)}, k={pieces_created.get('k', 0)}, p={pieces_created.get('p', 0)}")
-        print(f"   Case vide: oui")
-        print(f"   TOTAL: {len(self.piece_templates)} templates")
-        
-        # Vérifier qu'on a bien toutes les pièces
-        expected_pieces = ['R', 'N', 'B', 'Q', 'K', 'P', 'r', 'n', 'b', 'q', 'k', 'p', 'empty']
-        missing = [p for p in expected_pieces if p not in self.piece_templates]
-        if missing:
-            print(f"\n⚠️  ATTENTION: Pièces manquantes: {missing}")
-            print("   Vérifiez que l'échiquier est bien en position de départ!")
-        else:
-            print(f"\n✅ Toutes les pièces ont été détectées!")
-        
-        # Sauvegarder les templates
-        if not os.path.exists('templates'):
-            os.makedirs('templates')
-        
-        for piece, template in self.piece_templates.items():
-            img = Image.fromarray(template)
-            filename = f'templates/{piece}.png'
-            img.save(filename)
-            print(f"   Sauvegardé: {filename}")
-        
-        print("\n✓ Templates sauvegardés dans le dossier 'templates/'")
-    
     def load_templates(self):
-        """Charge les templates depuis le dossier"""
+        """Charge les templates depuis le dossier avec votre format de noms"""
         if not os.path.exists('templates'):
+            print("❌ Dossier 'templates/' introuvable!")
             return False
         
         template_files = os.listdir('templates')
         if len(template_files) == 0:
+            print("❌ Aucun fichier dans 'templates/'!")
             return False
         
-        for filename in template_files:
-            if filename.endswith('.png'):
-                piece = filename.replace('.png', '')
-                img = Image.open(f'templates/{filename}')
-                self.piece_templates[piece] = np.array(img)
+        # Liste des pièces attendues
+        expected_templates = ['wk', 'wq', 'wr', 'wb', 'wn', 'wp', 
+                            'bk', 'bq', 'br', 'bb', 'bn', 'bp', 'empty']
         
-        # Vérifier qu'on a toutes les pièces
-        expected_pieces = ['R', 'N', 'B', 'Q', 'K', 'P', 'r', 'n', 'b', 'q', 'k', 'p', 'empty']
-        loaded = [p for p in expected_pieces if p in self.piece_templates]
-        missing = [p for p in expected_pieces if p not in self.piece_templates]
+        loaded_count = 0
+        for template_name in expected_templates:
+            filename = f'templates/{template_name}.png'
+            if os.path.exists(filename):
+                img = Image.open(filename)
+                self.piece_templates[template_name] = np.array(img)
+                loaded_count += 1
+            else:
+                print(f"⚠️  Template manquant: {filename}")
         
-        print(f"✓ {len(self.piece_templates)} templates chargés")
-        if missing:
-            print(f"⚠️  Templates manquants: {missing}")
-            print(f"   Pièces chargées: {loaded}")
+        if loaded_count < 13:
+            print(f"❌ Templates incomplets: {loaded_count}/13 trouvés")
+            print(f"   Fichiers attendus dans 'templates/': wk.png, wq.png, wr.png, wb.png, wn.png, wp.png,")
+            print(f"                                          bk.png, bq.png, br.png, bb.png, bn.png, bp.png, empty.png")
             return False
         
+        print(f"✅ {loaded_count} templates chargés depuis 'templates/'")
+        print(f"   Pièces blanches: wk, wq, wr, wb, wn, wp")
+        print(f"   Pièces noires: bk, bq, br, bb, bn, bp")
+        print(f"   Case vide: empty")
         return True
     
     def match_piece(self, square_img):
-        """
-        Compare une case avec tous les templates et retourne la meilleure correspondance
-        """
+        """Compare une case avec tous les templates et retourne la meilleure correspondance"""
         square_img_np = np.array(square_img)
         
-        # Redimensionner si nécessaire
-        if square_img_np.shape[:2] != (self.square_size, self.square_size):
-            square_img_np = cv2.resize(square_img_np, (self.square_size, self.square_size))
+        # Redimensionner le template à la taille de la case détectée
+        target_size = square_img_np.shape[:2]
         
         # Convertir en niveaux de gris
         square_gray = cv2.cvtColor(square_img_np, cv2.COLOR_RGB2GRAY)
         
         # D'abord, vérifier si la case est vide
         if 'empty' in self.piece_templates:
-            empty_template_gray = cv2.cvtColor(self.piece_templates['empty'], cv2.COLOR_RGB2GRAY)
+            empty_template = self.piece_templates['empty']
+            empty_resized = cv2.resize(empty_template, (target_size[1], target_size[0]))
+            empty_template_gray = cv2.cvtColor(empty_resized, cv2.COLOR_RGB2GRAY)
+            
             empty_result = cv2.matchTemplate(square_gray, empty_template_gray, cv2.TM_CCOEFF_NORMED)
             empty_score = empty_result[0][0]
             
-            # Si très similaire à une case vide, c'est vide
+            # Si très similaire à une case vide
             if empty_score > 0.85:
                 return None
         
-        # Sinon, chercher quelle pièce c'est
+        # Chercher quelle pièce correspond le mieux
         best_match = None
         best_score = 0
         
-        for piece, template in self.piece_templates.items():
-            if piece == 'empty':
+        for template_name, template in self.piece_templates.items():
+            if template_name == 'empty':
                 continue
             
-            template_gray = cv2.cvtColor(template, cv2.COLOR_RGB2GRAY)
+            # Redimensionner le template à la taille de la case
+            template_resized = cv2.resize(template, (target_size[1], target_size[0]))
+            template_gray = cv2.cvtColor(template_resized, cv2.COLOR_RGB2GRAY)
             
             # Calculer la similarité
             result = cv2.matchTemplate(square_gray, template_gray, cv2.TM_CCOEFF_NORMED)
@@ -243,10 +173,10 @@ class ChessComDetector:
             
             if score > best_score:
                 best_score = score
-                best_match = piece
+                best_match = template_name
         
-        # Seuil de confiance pour les pièces
-        if best_score < 0.65:
+        # Seuil de confiance
+        if best_score < 0.60:
             return None
         
         return best_match
@@ -270,6 +200,8 @@ class ChessComDetector:
         
         # Scanner toutes les cases
         pieces_found = {'white': 0, 'black': 0}
+        detected_pieces = []
+        
         for rank in range(8):
             for file in range(8):
                 sx = x + file * self.square_size
@@ -278,17 +210,25 @@ class ChessComDetector:
                 square_img = screenshot.crop((sx, sy, sx + self.square_size, sy + self.square_size))
                 
                 # Reconnaître la pièce
-                piece = self.match_piece(square_img)
-                board_matrix[rank][file] = piece
+                piece_template = self.match_piece(square_img)
                 
-                if piece is not None:
-                    if piece.isupper():
+                if piece_template:
+                    # Convertir le format de template (wk, bp, etc.) en symbole FEN (K, p, etc.)
+                    fen_symbol = self.template_to_fen[piece_template]
+                    board_matrix[rank][file] = fen_symbol
+                    detected_pieces.append(f"{piece_template}@{chr(97+file)}{rank+1}")
+                    
+                    if piece_template[0] == 'w':
                         pieces_found['white'] += 1
                     else:
                         pieces_found['black'] += 1
         
         total_pieces = pieces_found['white'] + pieces_found['black']
         print(f"   {total_pieces} pièces détectées (Blanches: {pieces_found['white']}, Noires: {pieces_found['black']})")
+        
+        # Afficher les pièces détectées pour debug
+        if total_pieces < 20:
+            print(f"   ⚠️ Peu de pièces détectées. Pièces trouvées: {', '.join(detected_pieces[:10])}{'...' if len(detected_pieces) > 10 else ''}")
         
         # Convertir la matrice en FEN
         fen = self.matrix_to_fen(board_matrix)
@@ -305,12 +245,13 @@ class ChessComDetector:
             
             # Afficher la matrice pour debug
             print("\n    Debug - Matrice détectée:")
+            print("      a b c d e f g h")
             for rank in range(7, -1, -1):
-                row = ""
+                row = f"    {rank+1} "
                 for file in range(8):
                     p = board_matrix[rank][file]
                     row += (p if p else '.') + " "
-                print(f"    {rank+1}: {row}")
+                print(row)
             
             if self.last_fen:
                 print("\n    Utilisation de la dernière position connue")
@@ -414,14 +355,22 @@ class ChessComDetector:
         print("=" * 60)
         print("🎯 CHESS.COM MOVE SUGGESTER - AUTO DETECTION")
         print("=" * 60)
-        print("\n🤖 Reconnaissance automatique des pièces")
+        print("\n🤖 Reconnaissance automatique avec templates fixes")
         print("🛑 Appuyez sur Ctrl+C pour arrêter\n")
         
         if not self.start_engine():
             return
         
+        # Charger les templates
+        if not self.load_templates():
+            print("\n❌ Impossible de charger les templates!")
+            print("Assurez-vous d'avoir un dossier 'templates/' avec les fichiers:")
+            print("   wk.png, wq.png, wr.png, wb.png, wn.png, wp.png,")
+            print("   bk.png, bq.png, br.png, bb.png, bn.png, bp.png, empty.png")
+            return
+        
         # Recherche initiale de l'échiquier
-        print("🔍 Recherche de l'échiquier...")
+        print("\n🔍 Recherche de l'échiquier...")
         while not self.find_chessboard():
             print("⏳ Échiquier non détecté, nouvelle tentative dans 2s...")
             time.sleep(2)
@@ -430,13 +379,8 @@ class ChessComDetector:
         print(f"📍 Position: x={self.board_position[0]}, y={self.board_position[1]}, taille={self.board_position[2]}x{self.board_position[3]}")
         print(f"📏 Taille case: {self.square_size}px\n")
         
-        # Charger ou créer les templates
-        if not self.load_templates():
-            print("⚠️  Templates manquants ou incomplets. Création nécessaire...")
-            self.create_templates_from_board()
-        
         # Première analyse
-        print("\n⚡ Analyse initiale...")
+        print("⚡ Analyse initiale...")
         board = self.detect_board_state()
         moves = self.get_best_moves(board)
         if moves:
