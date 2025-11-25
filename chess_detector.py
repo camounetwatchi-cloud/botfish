@@ -432,3 +432,4 @@ if __name__ == "__main__":
     
     detector = ChessComDetector(stockfish_path)
     detector.run()
+
